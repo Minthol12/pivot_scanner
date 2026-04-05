@@ -13,7 +13,7 @@ import socket
 import argparse
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import socks  # PySocks: pip install PySocks
+import socks  # PySocks
 import ipaddress
 
 # Default ports to scan if not specified
@@ -26,7 +26,7 @@ def setup_socks_proxy(proxy_host, proxy_port):
     print(f"[+] SOCKS5 proxy configured: {proxy_host}:{proxy_port}")
 
 def check_host_alive(ip, timeout=2):
-    """Check if host is reachable via TCP echo or ICMP-like (SYN to port 80)"""
+    """Check if host is reachable via TCP echo (port 80)"""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(timeout)
@@ -110,10 +110,10 @@ def scan_network(target_network, ports, max_threads=50, proxy=None, proxy_port=N
     print("\n" + "="*60)
     print("SCAN SUMMARY")
     print("="*60)
-    for ip, ports in results.items():
-        if ports:
+    for ip, ports_list in results.items():
+        if ports_list:
             print(f"\n{ip}:")
-            for port, banner in ports:
+            for port, banner in ports_list:
                 print(f"  {port} -> {banner}")
         else:
             print(f"\n{ip}: no open ports found")
@@ -122,8 +122,8 @@ def scan_network(target_network, ports, max_threads=50, proxy=None, proxy_port=N
     print("\n" + "="*60)
     print("LATERAL MOVEMENT SUGGESTIONS")
     print("="*60)
-    for ip, ports in results.items():
-        for port, _ in ports:
+    for ip, ports_list in results.items():
+        for port, _ in ports_list:
             if port == 22:
                 print(f"  SSH on {ip} → try: ssh user@{ip} (credential reuse)")
             elif port == 445:
