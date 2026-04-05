@@ -1,30 +1,20 @@
 #!/usr/bin/env python3
 """
 Network Pivot Scanner – Phoenix404
-Interactive CLI + command-line mode.
-Scans internal networks via SOCKS5 proxy for lateral movement.
-
-Usage:
-    # Interactive mode (no args)
-    python pivot_scanner.py
-
-    # Command-line mode (non-interactive)
-    python pivot_scanner.py --proxy 127.0.0.1:1080 --target 10.0.0.0/24 --ports 22,445,3389
+Interactive CLI with validation for proxy, CIDR, ports, and threads.
 """
 
 import sys
 import socket
 import argparse
 import json
-import os
+import ipaddress
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import socks
-import ipaddress
 
-VERSION = "1.0"
+VERSION = "1.1"
 DEFAULT_PORTS = [21, 22, 23, 80, 135, 139, 443, 445, 3389, 5900, 8080, 8443]
 
-# Global config
 config = {
     "proxy_host": None,
     "proxy_port": None,
@@ -35,7 +25,45 @@ config = {
 results = {}
 
 # ------------------------------------------------------------
-# Core scanning functions (same as before)
+# Validation functions
+# ------------------------------------------------------------
+def validate_cidr(cidr):
+    """Check if CIDR is valid IPv4/IPv6 network"""
+    try:
+        ipaddress.ip_network(cidr, strict=False)
+        return True
+    except ValueError:
+        return False
+
+def validate_proxy(host, port, timeout=3):
+    """Test if SOCKS5 proxy is responsive by attempting a connection to a known host (8.8.8.8:80)"""
+    try:
+        # Set up socks proxy temporarily
+        test_sock = socks.socksocket()
+        test_sock.set_proxy(socks.SOCKS5, host, port)
+        test_sock.settimeout(timeout)
+        # Try to connect to a reliable external IP (Google DNS)
+        test_sock.connect(("8.8.8.8", 80))
+        test_sock.close()
+        return True
+    except Exception as e:
+        print(f"    Proxy test failed: {e}")
+        return False
+
+def validate_ports(ports):
+    """Ensure ports are within 1-65535 and no duplicates"""
+    if not ports:
+        return False
+    for p in ports:
+        if not isinstance(p, int) or p < 1 or p > 65535:
+            return False
+    return len(ports) == len(set(ports))
+
+def validate_threads(threads):
+    return isinstance(threads, int) and 1 <= threads <= 500
+
+# ------------------------------------------------------------
+# Core scanning functions
 # ------------------------------------------------------------
 def setup_socks_proxy(proxy_host, proxy_port):
     socks.set_default_proxy(socks.SOCKS5, proxy_host, proxy_port)
@@ -84,11 +112,24 @@ def grab_banner(ip, port, timeout=2):
 
 def scan_network():
     global results
+    # Validate everything before scan
     if not config["proxy_host"] or not config["proxy_port"]:
-        print("[-] Proxy not configured. Use option 1 to set proxy.")
+        print("[-] Proxy not configured. Use option 1.")
+        return
+    if not validate_proxy(config["proxy_host"], config["proxy_port"]):
+        print("[-] Proxy unreachable or invalid. Check your proxy settings.")
         return
     if not config["target_network"]:
-        print("[-] Target network not set. Use option 2 to set target.")
+        print("[-] Target network not set. Use option 2.")
+        return
+    if not validate_cidr(config["target_network"]):
+        print("[-] Invalid CIDR format. Use something like 10.0.0.0/24")
+        return
+    if not validate_ports(config["ports"]):
+        print("[-] Invalid port list. Ports must be 1-65535, no duplicates.")
+        return
+    if not validate_threads(config["threads"]):
+        print("[-] Thread count must be between 1 and 500.")
         return
 
     setup_socks_proxy(config["proxy_host"], config["proxy_port"])
@@ -174,44 +215,58 @@ def set_proxy():
     proxy = input("Enter SOCKS5 proxy (host:port) [e.g., 127.0.0.1:1080]: ").strip()
     try:
         host, port = proxy.split(":")
-        config["proxy_host"] = host
-        config["proxy_port"] = int(port)
-        print(f"[+] Proxy set to {host}:{port}")
-    except:
+        port = int(port)
+        if port < 1 or port > 65535:
+            print("[-] Port out of range (1-65535)")
+            return
+        # Test proxy immediately
+        print("[*] Testing proxy connection...")
+        if validate_proxy(host, port):
+            config["proxy_host"] = host
+            config["proxy_port"] = port
+            print(f"[+] Proxy set and verified: {host}:{port}")
+        else:
+            print("[-] Proxy test failed. Settings not saved.")
+    except ValueError:
         print("[-] Invalid format. Use host:port")
 
 def set_target():
     target = input("Enter target network CIDR [e.g., 10.0.0.0/24]: ").strip()
-    try:
-        ipaddress.ip_network(target, strict=False)
+    if validate_cidr(target):
         config["target_network"] = target
         print(f"[+] Target network set to {target}")
-    except:
-        print("[-] Invalid CIDR")
+        # Show number of IPs
+        network = ipaddress.ip_network(target, strict=False)
+        print(f"    This network contains {network.num_addresses - 2 if network.num_addresses > 2 else network.num_addresses} usable hosts")
+    else:
+        print("[-] Invalid CIDR format. Example: 192.168.1.0/24")
 
 def set_ports():
     ports_input = input(f"Enter ports (comma-separated, or 'default' for {DEFAULT_PORTS}): ").strip()
     if ports_input.lower() == 'default':
         config["ports"] = DEFAULT_PORTS.copy()
-    else:
-        try:
-            ports = [int(p.strip()) for p in ports_input.split(",")]
+        print(f"[+] Ports set to default: {config['ports']}")
+        return
+    try:
+        ports = [int(p.strip()) for p in ports_input.split(",")]
+        if validate_ports(ports):
             config["ports"] = ports
-        except:
-            print("[-] Invalid port list. Keeping previous.")
-            return
-    print(f"[+] Ports set: {config['ports']}")
+            print(f"[+] Ports set: {config['ports']}")
+        else:
+            print("[-] Invalid port list. Ports must be 1-65535, no duplicates.")
+    except ValueError:
+        print("[-] Invalid input. Use numbers separated by commas.")
 
 def set_threads():
     try:
-        t = int(input(f"Max threads (current {config['threads']}): ").strip())
-        if t > 0:
+        t = int(input(f"Max threads (current {config['threads']}, 1-500): ").strip())
+        if validate_threads(t):
             config["threads"] = t
             print(f"[+] Threads set to {t}")
         else:
-            print("[-] Must be >0")
-    except:
-        print("[-] Invalid number")
+            print("[-] Thread count must be between 1 and 500.")
+    except ValueError:
+        print("[-] Invalid number.")
 
 def show_config():
     print("\nCurrent Configuration:")
@@ -220,20 +275,57 @@ def show_config():
     print(f"  Ports: {config['ports']}")
     print(f"  Threads: {config['threads']}")
 
+def pre_scan_check():
+    """Run all validations without scanning"""
+    print("\n=== PRE-SCAN VALIDATION ===\n")
+    errors = []
+    if not config["proxy_host"] or not config["proxy_port"]:
+        errors.append("Proxy not set")
+    else:
+        print(f"[*] Testing proxy {config['proxy_host']}:{config['proxy_port']}...")
+        if validate_proxy(config["proxy_host"], config["proxy_port"]):
+            print("[+] Proxy reachable")
+        else:
+            errors.append("Proxy unreachable")
+    if not config["target_network"]:
+        errors.append("Target network not set")
+    else:
+        if validate_cidr(config["target_network"]):
+            print(f"[+] CIDR valid: {config['target_network']}")
+        else:
+            errors.append("Invalid CIDR")
+    if not validate_ports(config["ports"]):
+        errors.append("Invalid ports list")
+    else:
+        print(f"[+] Ports valid: {config['ports']}")
+    if not validate_threads(config["threads"]):
+        errors.append("Invalid thread count")
+    else:
+        print(f"[+] Thread count valid: {config['threads']}")
+    if errors:
+        print("\n[-] Validation failed:")
+        for e in errors:
+            print(f"    - {e}")
+        return False
+    else:
+        print("\n[+] All settings are valid. Ready to scan.")
+        return True
+
 def interactive_menu():
     while True:
         print("\n" + "="*50)
         print("  NETWORK PIVOT SCANNER - Phoenix404")
         print("="*50)
-        print("1. Set SOCKS5 proxy")
+        print("1. Set SOCKS5 proxy (with test)")
         print("2. Set target network (CIDR)")
         print("3. Set ports to scan")
         print("4. Set thread count")
         print("5. Show current config")
-        print("6. RUN SCAN")
-        print("7. Show scan summary")
-        print("8. Export results (JSON)")
-        print("9. Exit")
+        print("6. Pre-scan validation check")
+        print("7. RUN SCAN")
+        print("8. Show scan summary")
+        print("9. Export results (JSON)")
+        print("10. Exit")
         choice = input("\nChoice: ").strip()
         if choice == '1':
             set_proxy()
@@ -246,12 +338,14 @@ def interactive_menu():
         elif choice == '5':
             show_config()
         elif choice == '6':
-            scan_network()
+            pre_scan_check()
         elif choice == '7':
-            show_summary()
+            scan_network()
         elif choice == '8':
-            export_results()
+            show_summary()
         elif choice == '9':
+            export_results()
+        elif choice == '10':
             print("[+] Exiting.")
             sys.exit(0)
         else:
@@ -265,22 +359,38 @@ def main():
     parser.add_argument("--threads", type=int, default=50)
     args = parser.parse_args()
 
-    # If any CLI args provided, run in command-line mode
     if args.proxy or args.target or args.ports:
+        # Non-interactive mode with minimal validation
         if not args.proxy or not args.target:
-            print("[-] In command-line mode, both --proxy and --target are required.")
+            print("[-] Both --proxy and --target required in command-line mode.")
             sys.exit(1)
-        config["proxy_host"], config["proxy_port"] = args.proxy.split(":")
-        config["proxy_port"] = int(config["proxy_port"])
+        try:
+            host, port = args.proxy.split(":")
+            config["proxy_host"] = host
+            config["proxy_port"] = int(port)
+        except:
+            print("[-] Invalid proxy format. Use host:port")
+            sys.exit(1)
+        if not validate_cidr(args.target):
+            print("[-] Invalid CIDR")
+            sys.exit(1)
         config["target_network"] = args.target
         if args.ports:
-            config["ports"] = [int(p) for p in args.ports.split(",")]
+            ports = [int(p) for p in args.ports.split(",")]
+            if validate_ports(ports):
+                config["ports"] = ports
+            else:
+                print("[-] Invalid ports list")
+                sys.exit(1)
         if args.threads:
-            config["threads"] = args.threads
+            if validate_threads(args.threads):
+                config["threads"] = args.threads
+            else:
+                print("[-] Threads must be 1-500")
+                sys.exit(1)
         scan_network()
         show_summary()
     else:
-        # Interactive mode
         interactive_menu()
 
 if __name__ == "__main__":
